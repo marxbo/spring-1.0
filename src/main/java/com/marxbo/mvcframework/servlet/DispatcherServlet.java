@@ -13,8 +13,8 @@ import java.io.InputStream;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Parameter;
 import java.util.*;
+import java.util.regex.Pattern;
 
 /**
  * 核心控制器
@@ -27,15 +27,13 @@ public class DispatcherServlet extends HttpServlet {
 
     /** application.properties配置文件 */
     private Properties contextConfig = new Properties();
-
     /** 扫描包下的所有类名 */
     private List<String> classNames = new ArrayList<String>();
-
     /** IOC容器 */
     private Map<String, Object> ioc = new HashMap<String, Object>();
-
     /** 保存URL和Method的对应关系 */
-    private Map<String, Method> handlerMapping = new HashMap<String, Method>();
+    //private Map<String, Method> handlerMapping = new HashMap<String, Method>();
+    private List<Handler> handlerMapping = new ArrayList<>();
 
     @Override
     protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
@@ -52,58 +50,96 @@ public class DispatcherServlet extends HttpServlet {
         }
     }
 
+    /**
+     * 请求委派
+     *
+     * @param request 请求
+     * @param response 响应
+     * @throws Exception
+     */
     private void doDispatcher(HttpServletRequest request, HttpServletResponse response) throws Exception {
-        // 端口号后的路径
-        String uri = request.getRequestURI();
-        String contextPath = request.getContextPath();
-        uri = uri.replaceFirst(contextPath, "").replaceAll("/+", "/");
-
-        if (!this.handlerMapping.containsKey(uri)) {
+        Handler handler = this.getHandler(request);
+        //if (!this.handlerMapping.containsKey(uri)) {
+        if (handler == null) {
             response.getWriter().write("404 Not Found!!!");
             return;
         }
-
         // 获取请求URL映射的Method
-        Method m = this.handlerMapping.get(uri);
+        //Method m = this.handlerMapping.get(uri);
+
         // 请求参数Map  => http://localhost:8080/demo/query?name=marxbo&name=ma => key=name  value=["marxbo", "ma"]
-        Map<String, String[]> params = request.getParameterMap();
+        Map<String, String[]> parameterMap = request.getParameterMap();
         // 获取Method的形参列表
-        Class<?>[] parameterTypes = m.getParameterTypes();
+        // Class<?>[] parameterTypes = m.getParameterTypes();
+        Class<?>[] parameterTypes = handler.method.getParameterTypes();
         Object[] paramValues = new Object[parameterTypes.length];
-        for (int i = 0; i < parameterTypes.length; i++) {
+
+        for (Map.Entry<String, String[]> param : parameterMap.entrySet()) {
+            if (!handler.paramIndexMapping.containsKey(param.getKey())) {
+                continue;
+            }
+
+            System.out.println(Arrays.toString(param.getValue()));
+            String value = Arrays.toString(parameterMap.get(param.getKey()))
+                    .replaceAll("\\[|\\]", "")
+                    .replaceAll(",\\s", ",");
+            // 根据参数名称获取形参的索引
+            Integer index = handler.paramIndexMapping.get(param.getKey());
+            // 转化类型并设值到实参列表
+            paramValues[index] = this.convert(parameterTypes[index], value);
+        }
+
+        if (handler.paramIndexMapping.containsKey(HttpServletRequest.class.getName())) {
+            Integer reqIndex = handler.paramIndexMapping.get(HttpServletRequest.class.getName());
+            paramValues[reqIndex] = request;
+        }
+        if (handler.paramIndexMapping.containsKey(HttpServletResponse.class.getName())) {
+            Integer respIndex = handler.paramIndexMapping.get(HttpServletResponse.class.getName());
+            paramValues[respIndex] = response;
+        }
+
+
+        /*for (int i = 0; i < parameterTypes.length; i++) {
             // 形参Class对象，不能通过它获取形参的注解
             Class<?> parameterType = parameterTypes[i];
+            // 判断类型对象是否相同直接用==
             if (parameterType == HttpServletRequest.class) {
                 paramValues[i] = request;
                 continue;
             } else if (parameterType == HttpServletResponse.class) {
-                paramValues[i] = request;
+                paramValues[i] = response;
                 continue;
             } else if (parameterType == String.class) {
-                // 获取Method的各个形参上的注解列表（一个方法参数上可以加多个注解）
+                // 获取Method的各个形参上的注解列表(注：一个方法参数上可以加多个注解)
+                // 错误示范：RequestParam requestParam = parameterType.getAnnotation(RequestParam.class);
                 Annotation[][] pas = m.getParameterAnnotations();
                 for (int j = 0; j < pas.length; j++) {
                     for (Annotation a : pas[j]) {
-                        // 判断注解是否为@RequestParam
-                        boolean flag = RequestParam.class.isInstance(a);
-                        if (a instanceof RequestParam) {
+                        // 判断注解是否为@RequestParam的2种方法
+                        // boolean isRequestParam = a instanceof RequestParam;
+                        boolean isRequestParam = RequestParam.class.isInstance(a);
+                        if (isRequestParam) {
                             String paramName = ((RequestParam) a).value();
-                            // 若请求参数中包含该参数名称
-                            if (params.containsKey(paramName)) {
-
+                            // 若参数注解的value不为空
+                            if (!"".equals(paramName.trim())) {
+                                System.out.println(Arrays.toString(parameterMap.get(paramName)));
+                                String value = Arrays.toString(parameterMap.get(paramName))
+                                        .replaceAll("\\[|\\]", "")
+                                        .replaceAll(",\\s", ",");
+                                paramValues[i] = value;
                             }
                         }
                     }
                 }
-                RequestParam requestParam = parameterType.getAnnotation(RequestParam.class);
-                if (params.containsKey(requestParam.value())) {
-
-                }
             }
+        }*/
+        // String beanName = toLowerFirstCase(m.getDeclaringClass().getSimpleName());
+        // m.invoke(ioc.get(beanName), paramValues);
+        Object returnValue = handler.method.invoke(handler.controller, paramValues);
+        if (returnValue == null || returnValue instanceof Void) {
+            return;
         }
-        String beanName = toLowerFirstCase(m.getDeclaringClass().getSimpleName());
-        m.invoke(ioc.get(beanName), paramValues);
-        // m.invoke(ioc.get(beanName), request, response, params.get("name")[0]);
+        response.getWriter().write(returnValue.toString());
     }
 
     /**
@@ -116,16 +152,12 @@ public class DispatcherServlet extends HttpServlet {
     public void init(ServletConfig config) throws ServletException {
         // 1、加载配置文件
         doLoadConfig(config.getInitParameter("contextConfigLocation"));
-
-        // 2、扫描相关的类
+        // 2、扫描包下的所有类
         doScanner((String) contextConfig.get("scanPackage"));
-
         // 3、初始化扫描到的类，加入到IOC容器中
         doInstance();
-
         // 4、完成DI依赖注入
         doAutowired();
-
         // 5、初始化HandlerMapping
         initHandlerMapping();
 
@@ -157,12 +189,12 @@ public class DispatcherServlet extends HttpServlet {
     }
 
     /**
-     * 2、扫描相关的类
+     * 2、扫描包下的所有类
      *
      * @param scanPackage 扫描的包路径
      */
     private void doScanner(String scanPackage) {
-        // classpath类路径 + 扫描包路径
+        // classpath类路径 + 扫描包路径(包路径转为文件路径)
         String path = this.getClass()
                 .getResource("/" + scanPackage.replaceAll("\\.", "/"))
                 .getPath();
@@ -219,7 +251,7 @@ public class DispatcherServlet extends HttpServlet {
                         if (ioc.containsKey(toLowerFirstCase(i.getName()))) {
                             throw new Exception("The \"" + i.getName() + "\" is exists!");
                         }
-                        // 依然使用instance
+                        // key：接口名首字母小写；value：依然使用instance
                         ioc.put(toLowerFirstCase(i.getSimpleName()), instance);
                     }
                 } else {
@@ -240,6 +272,8 @@ public class DispatcherServlet extends HttpServlet {
             return;
         }
         for (Map.Entry<String, Object> entry : ioc.entrySet()) {
+            // Declared：所有的的字段，包括 private/protected/default
+            // 正常来说，普通的OOP编程只能拿到 public 的属性
             Field[] fields = entry.getValue().getClass().getDeclaredFields();
             for (Field f : fields) {
                 // 判断成员属性是否需要依赖注入
@@ -251,6 +285,9 @@ public class DispatcherServlet extends HttpServlet {
                 String beanName = autowired.value().trim();
                 // 类名首字母小写
                 if ("".equals(beanName)) {
+                    // field.getType() => com.marxbo.demo.service.DemoService
+                    // field.getDeclaringClass() => com.marxbo.demo.controller.DemoController
+                    // field.getClass() => java.lang.reflect.Field
                     beanName = toLowerFirstCase(f.getType().getSimpleName());
                 }
                 try {
@@ -294,8 +331,10 @@ public class DispatcherServlet extends HttpServlet {
                 RequestMapping requestMapping = m.getAnnotation(RequestMapping.class);
                 String url = ("/" + baseUrl + "/" + requestMapping.value())
                         .replaceAll("/+", "/");
-                handlerMapping.put(url, m);
-                System.out.println("Mapped: " + url + ", " + m);
+                //handlerMapping.put(url, m);
+                Pattern pattern = Pattern.compile(url);
+                handlerMapping.add(new Handler(pattern, entry.getValue(), m));
+                System.out.println("Mapped: " + url + " ==> " + m);
             }
         }
     }
@@ -310,6 +349,98 @@ public class DispatcherServlet extends HttpServlet {
         char[] chars = simpleName.toCharArray();
         chars[0] += 32;
         return String.valueOf(chars);
+    }
+
+    /**
+     * 记录Controller种RequestMapping和Method的关系
+     */
+    private class Handler {
+        /** URL映射Pattern */
+        protected Pattern pattern;
+        /** 保存方法对应的实例 */
+        protected Object controller;
+        /** 保存映射的方法 */
+        protected Method method;
+        /** 参数顺序 */
+        protected Map<String, Integer> paramIndexMapping;
+
+        protected Handler(Pattern pattern, Object controller, Method method) {
+            this.controller = controller;
+            this.method = method;
+            this.pattern = pattern;
+            paramIndexMapping = new HashMap<>();
+            this.putParamIndexMapping(method);
+        }
+
+        /**
+         * 解析方法参数
+         *
+         * @param method 方法
+         */
+        private void putParamIndexMapping(Method method) {
+            // 提取方法中加了注解的参数
+            Annotation[][] pas = method.getParameterAnnotations();
+            for (int i = 0; i < pas.length; i++) {
+                // 遍历一个参数的多个注解
+                for (Annotation a : pas[i]) {
+                    boolean isRequestParam = RequestParam.class.isInstance(a);
+                    if (isRequestParam) {
+                        String paramName = ((RequestParam) a).value();
+                        if (!"".equals(paramName.trim())) {
+                            paramIndexMapping.put(paramName,i);
+                        }
+                    }
+                }
+            }
+            // 提取方法中的request和response参数
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            for (int i = 0; i < parameterTypes.length; i++) {
+                Class<?> type = parameterTypes[i];
+                if (type == HttpServletRequest.class || type == HttpServletResponse.class) {
+                    paramIndexMapping.put(type.getName(), i);
+                }
+            }
+        }
+    }
+
+    /**
+     * 根据请求获取处理器
+     *
+     * @param request 请求
+     * @return 处理器
+     */
+    private Handler getHandler(HttpServletRequest request) {
+        if (handlerMapping.isEmpty()) {
+            return null;
+        }
+        // 端口号后的路径
+        String uri = request.getRequestURI();
+        // 应用上下文路径
+        String contextPath = request.getContextPath();
+        // 去掉上下文路径，替换//为/
+        uri = uri.replaceFirst(contextPath, "").replaceAll("/+", "/");
+
+        for (Handler handler : handlerMapping) {
+            if (handler.pattern.matcher(uri).find()) {
+                return handler;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 参数类型转化
+     *
+     * @param type 类型
+     * @param value 参数
+     * @return 对应类型参数
+     */
+    private Object convert(Class<?> type, String value) {
+        if (Integer.class == type) {
+            return Integer.valueOf(value);
+        }
+        // 多种类型if判断省略...
+        return value;
     }
 
 }

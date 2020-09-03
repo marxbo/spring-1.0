@@ -15,6 +15,6 @@ public interface DemoService {
      * @param name
      * @return
      */
-    public String get(String name);
+    String get(String name);
 
 }
